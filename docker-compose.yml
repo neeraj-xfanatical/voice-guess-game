@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - MAX_PLAYERS=25
+      - RECORD_PHASE_SECONDS=90
+      - MAX_CLIP_SECONDS=20
+      - DEFAULT_VOTE_SECONDS=30
+      - ROOM_IDLE_MINUTES=30
+    restart: unless-stopped

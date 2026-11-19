@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Whose Voice? · Room</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="row">
+      <span class="brand">Whose Voice?</span>
+      <span class="room-code" id="roomCode" title="Click to copy">------</span>
+    </div>
+    <div class="row">
+      <span id="meInfo"></span>
+      <span class="conn"><span class="dot wait" id="connDot"></span><span id="connText">Connecting...</span></span>
+      <button class="secondary small" id="leaveBtn">Leave</button>
+    </div>
+  </header>
+
+  <div class="layout" id="layout">
+    <main class="side">
+      <div id="notice" class="notice hidden"></div>
+      <section class="card stage" id="stage">
+        <div class="stage-center"><div class="spinner"></div><p class="muted">Connecting to the room...</p></div>
+      </section>
+
+      <section class="card hidden" id="testPanel">
+        <h3>Voice test</h3>
+        <p class="muted small" id="testNote"></p>
+        <div id="testBody">
+          <div class="filters" id="testFilters"></div>
+          <div class="rec-panel" id="testRec" style="margin-top:.8rem"></div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="side">
+      <section class="card hidden" id="controlsPanel">
+        <h3>Controls</h3>
+        <div class="controls" id="controls"></div>
+      </section>
+
+      <section class="card" id="membersPanel">
+        <h3 id="membersTitle">Players</h3>
+        <ul class="members" id="members"></ul>
+      </section>
+
+      <section class="card hidden" id="settingsPanel">
+        <h3>Settings</h3>
+        <label for="voteSeconds">Voting time (seconds)</label>
+        <input id="voteSeconds" type="number" min="10" max="120">
+        <label for="customPhrases">Your own phrases (one per line)</label>
+        <textarea id="customPhrases" rows="4" placeholder="I love samosas more than people."></textarea>
+        <button class="secondary" id="saveSettings" style="margin-top:.7rem;width:100%">Save settings</button>
+      </section>
+
+      <section class="card hidden" id="resultsPanel">
+        <div class="row" style="justify-content:space-between">
+          <h3 style="margin:0">Results</h3>
+          <button class="secondary small" id="downloadCsv">CSV</button>
+        </div>
+        <p class="muted small">These are also saved in your browser and will remain even if the server goes down.</p>
+        <div class="results-box" id="results"></div>
+      </section>
+    </aside>
+  </div>
+
+  <div class="overlay hidden" id="overlay">
+    <div class="card">
+      <h2 id="overlayTitle"></h2>
+      <p class="muted" id="overlayText"></p>
+      <div class="row" style="justify-content:center" id="overlayButtons"></div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/vendor/tone/Tone.js"></script>
+  <script src="/js/common.js"></script>
+  <script src="/js/audio.js"></script>
+  <script src="/js/room.js"></script>
+</body>
+</html>

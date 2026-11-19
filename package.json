@@ -1,0 +1,23 @@
+{
+  "name": "voice-guess-game",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multiplayer party game: guess whose disguised voice it is",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node test/smoke.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "4.21.2",
+    "socket.io": "4.8.1",
+    "tone": "14.8.49"
+  },
+  "devDependencies": {
+    "socket.io-client": "4.8.1"
+  }
+}

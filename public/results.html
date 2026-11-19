@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Whose Voice? · Results</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <main class="home">
+    <div class="row" style="justify-content:space-between;margin-bottom:1rem">
+      <h1 style="margin:0">Saved results</h1>
+      <a class="btn secondary" href="/">Home</a>
+    </div>
+    <p class="muted">These results are saved in the host/co-host browser (last 5 games). Recordings are kept until the host starts a new game or closes the room.</p>
+    <div id="games"></div>
+  </main>
+  <script src="/js/common.js"></script>
+  <script>
+    (function () {
+      const { Results, renderResults, downloadResultsCsv, attachClips } = window.VGG;
+      const games = Results.all();
+      const box = document.getElementById('games');
+      if (!games.length) {
+        box.innerHTML = '<div class="card"><p class="muted">No saved results found.</p></div>';
+        return;
+      }
+      games.forEach((g, i) => {
+        const card = document.createElement('section');
+        card.className = 'card';
+        card.style.marginBottom = '1rem';
+        card.innerHTML =
+          `<div class="row" style="justify-content:space-between"><h3 style="margin:0">Game ${i + 1}${i === 0 ? ' (latest)' : ''}</h3>` +
+          `<button class="secondary small">Download CSV</button></div>` +
+          renderResults(g);
+        card.querySelector('button').onclick = () => downloadResultsCsv(g);
+        box.appendChild(card);
+        attachClips(card);
+      });
+    })();
+  </script>
+</body>
+</html>

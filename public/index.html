@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Whose Voice?</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <main class="home">
+    <div class="hero">
+      <h1>Whose Voice?</h1>
+      <p class="muted">Disguise your voice, guess your friends. One speaks, everyone guesses.</p>
+    </div>
+
+    <div id="resume" class="card resume hidden">
+      <div>
+        <b>Rejoin your game?</b>
+        <div class="muted small" id="resumeText"></div>
+      </div>
+      <div class="row">
+        <button id="resumeBtn">Continue</button>
+        <button id="forgetBtn" class="secondary">Forget</button>
+      </div>
+    </div>
+
+    <div class="grid">
+      <form id="joinForm" class="card">
+        <h2>Join a room</h2>
+        <label for="joinCode">Room code</label>
+        <input id="joinCode" class="code-input" maxlength="6" autocomplete="off" placeholder="ABC123" required>
+        <label for="joinName">Your name</label>
+        <input id="joinName" maxlength="20" autocomplete="off" placeholder="e.g. Rahul" required>
+        <button type="submit">Join</button>
+      </form>
+
+      <form id="createForm" class="card">
+        <h2>Create a new room</h2>
+        <p class="muted small">You will be the host. The host is never picked and does not vote, they just run the game.</p>
+        <label for="hostName">Host name</label>
+        <input id="hostName" maxlength="20" autocomplete="off" placeholder="e.g. Neeraj" required>
+        <button type="submit" id="createBtn">Create room</button>
+        <p id="roomBusy" class="muted small hidden">A room is already running. Only one room can exist at a time.</p>
+      </form>
+    </div>
+
+    <p id="lastResults" class="muted hidden" style="text-align:center;margin-top:1.5rem">
+      <a href="/results">See last game's results</a>
+    </p>
+  </main>
+
+  <script src="/js/common.js"></script>
+  <script src="/js/home.js"></script>
+</body>
+</html>
