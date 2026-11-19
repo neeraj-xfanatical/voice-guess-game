@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Whose Voice? · Room</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
@@ -51,6 +53,8 @@
         <h3>Settings</h3>
         <label for="voteSeconds">Voting time (seconds)</label>
         <input id="voteSeconds" type="number" min="10" max="120">
+        <label for="riddleSeconds">Riddle answer time (seconds)</label>
+        <input id="riddleSeconds" type="number" min="10" max="180">
         <label for="customPhrases">Your own phrases (one per line)</label>
         <textarea id="customPhrases" rows="4" placeholder="I love samosas more than people."></textarea>
         <button class="secondary" id="saveSettings" style="margin-top:.7rem;width:100%">Save settings</button>

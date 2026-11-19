@@ -70,7 +70,14 @@ const ok = (label) => {
 
 (async () => {
   const server = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
-    env: { ...process.env, PORT: String(PORT), DEFAULT_VOTE_SECONDS: '10', RECORDER_OFFLINE_SECONDS: '1', RECLAIM_AFTER_SECONDS: '1' },
+    env: {
+      ...process.env,
+      PORT: String(PORT),
+      DEFAULT_VOTE_SECONDS: '10',
+      RECORDER_OFFLINE_SECONDS: '1',
+      RECLAIM_AFTER_SECONDS: '1',
+      RIDDLES_FILE: path.join(__dirname, 'riddles.fixture.js'),
+    },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
   await new Promise((res) => server.stdout.on('data', (d) => d.toString().includes('running') && res()));
@@ -298,6 +305,87 @@ const ok = (label) => {
     await waitFor(() => a2.events.includes('room:closed'), 'closed');
     assert.equal((await http('GET', '/api/status')).data.roomActive, false);
     ok('close room -> new room can be created');
+
+    // ---- Guess the Teammate
+    const host2 = (await http('POST', '/api/rooms', { json: { name: 'Host' } })).data;
+    const joinR = async (name) => (await http('POST', `/api/rooms/${host2.code}/join`, { json: { name } })).data;
+    const [P, Q] = [await joinR('Priya'), await joinR('Quinn')];
+    const [rh, rp, rq] = [host2, P, Q].map((s) => client(auth(s)));
+    clients.push(rh, rp, rq);
+    await Promise.all([rh, rp, rq].map((x) => x.ready));
+    assert.equal(rh.state.mode, 'voice');
+    assert.equal((await rp.send('host:mode', { mode: 'riddle' })).ok, false);
+    assert.equal((await rh.send('host:mode', { mode: 'riddle' })).ok, true);
+    await waitFor(() => rp.state.mode === 'riddle', 'riddle mode');
+    assert.deepEqual(rp.state.riddles, { total: 3, asked: 0 });
+    ok('host switches to Guess the Teammate');
+
+    assert.equal((await rh.send('host:pick')).ok, true);
+    await waitFor(() => rp.state.phase === 'VOTING' && rp.state.round.kind === 'riddle', 'riddle shown');
+    let rr = rp.state.round;
+    assert.equal(rr.riddle.title, 'The Secret Riddle One');
+    assert.deepEqual(rr.choices, ['Kiran', 'Zoya']);
+    assert.equal(rr.canAnswer, true);
+    assert.equal(rh.state.round.canAnswer, false);
+    assert.equal((await rh.send('host:mode', { mode: 'voice' })).ok, false);
+    for (const x of [rh, rp, rq]) assert.ok(!JSON.stringify(x.state).includes('README.md'));
+    ok('riddle shown with name choices; answer and photo are not sent before the reveal');
+
+    assert.equal((await rp.send('vote:cast', { roundId: rr.id, choice: 'Nobody' })).ok, false);
+    assert.equal((await rp.send('vote:cast', { roundId: rr.id, choice: 'Kiran' })).ok, true);
+    assert.equal((await rp.send('vote:cast', { roundId: rr.id, choice: 'Zoya' })).ok, false);
+    ok('invalid answer rejected; one answer per player');
+    await sleep(50);
+    assert.equal((await rq.send('vote:cast', { roundId: rr.id, choice: 'Zoya' })).ok, true);
+    await waitFor(() => rh.state.phase === 'REVEAL' && rp.state.phase === 'REVEAL' && rq.state.phase === 'REVEAL', 'riddle reveal');
+    const res1 = rh.state.round.result;
+    assert.equal(res1.answer, 'Kiran');
+    assert.equal(res1.photoUrl, '/photos/README.md');
+    assert.equal(res1.fastest.name, 'Priya');
+    assert.ok(rp.state.me.score >= 10 && rp.state.me.score <= 15, 'correct + speed bonus');
+    assert.equal(rq.state.me.score, 0);
+    ok(`all answered -> reveal with photo and fastest winner (Priya +${rp.state.me.score})`);
+
+    // ---- team vote (no answer set): the most-voted name wins, a tie is shared
+    await rh.send('host:pick');
+    await waitFor(() => rq.state.phase === 'VOTING' && rq.state.round.riddleNumber === 2, 'team vote riddle');
+    rr = rq.state.round;
+    assert.equal(rr.teamVote, true);
+    const before = [rp.state.me.score, rq.state.me.score];
+    await rp.send('vote:cast', { roundId: rr.id, choice: 'Kiran' });
+    await rq.send('vote:cast', { roundId: rr.id, choice: 'Zoya' });
+    await waitFor(() => [rh, rp, rq].every((x) => x.state.phase === 'REVEAL'), 'team vote reveal');
+    const tv = rh.state.round.result;
+    assert.equal(tv.teamVote, true);
+    assert.equal(tv.answer, 'Kiran & Zoya');
+    assert.deepEqual(tv.tally, [{ name: 'Kiran', count: 1 }, { name: 'Zoya', count: 1 }]);
+    assert.ok(rp.state.me.score > before[0] && rq.state.me.score > before[1]);
+    ok('team vote: tally shown, tied names share the win and both voters score');
+
+    await rh.send('host:pick');
+    await waitFor(() => rq.state.phase === 'VOTING' && rq.state.round.riddleNumber === 3, 'riddle 3');
+    rr = rq.state.round;
+    assert.deepEqual(rr.choices, ['Coffee', 'Teamwork']);
+    await rq.send('vote:cast', { roundId: rr.id, choice: 'Teamwork' });
+    await rh.send('host:end-voting');
+    await waitFor(() => rh.state.phase === 'REVEAL', 'riddle 2 reveal');
+    assert.equal(rh.state.round.result.photoUrl, null);
+    ok('own choices for a riddle; missing photo file -> no photo');
+    assert.equal((await rh.send('host:pick')).ok, false);
+    ok('no more riddles -> cannot start another');
+
+    await rh.send('host:end-game');
+    await waitFor(() => rp.state.phase === 'ENDED', 'riddle game ended');
+    assert.deepEqual(rp.state.replay.map((x) => [x.kind, x.answer]), [['riddle', 'Kiran'], ['riddle', 'Kiran & Zoya'], ['riddle', 'Teamwork']]);
+    assert.equal(rh.state.history.length, 3);
+    ok('game over shows every riddle answer');
+    await rh.send('host:mode', { mode: 'voice' }); // ignored: cannot switch on the Game over screen
+    assert.equal((await rh.send('host:new-game', { mode: 'riddle' })).ok, true);
+    await waitFor(() => rh.state.phase === 'LOBBY', 'new game');
+    assert.equal(rh.state.mode, 'riddle');
+    ok('New game can start straight into Guess the Teammate');
+    assert.deepEqual(rh.state.riddles, { total: 3, asked: 0 });
+    ok('new game resets the riddles');
 
     console.log(`\nAll ${passed} checks passed ✅`);
   } catch (err) {

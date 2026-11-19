@@ -14,6 +14,18 @@ Party game for a Meet call: one random player records an English phrase with a v
 - Results are also saved in the host/co-host browser (`/results`, CSV download)
 - Works on Chrome and Brave on Windows desktop
 
+## Guess the Teammate (second game)
+
+The host can switch the room between **Whose Voice?** and **Guess the Teammate** in the Controls panel (between rounds). Both games share the room, players and scoreboard.
+
+- The host shows the riddles one by one, in the order of `server/riddles.js`
+- Every player picks the teammate's name from a list. One answer per riddle, no changing it
+- Correct answer: +10 points, plus up to +5 for answering fast. The fastest correct player is shown as the winner of that riddle
+- After everyone answers (or time runs out, 45 s by default, changeable in Settings) the answer is revealed with the teammate's photo
+- At the end the scoreboard shows the overall winner and every riddle's answer
+
+**Setup:** open `server/riddles.js`, write each teammate's name in `answer`, put their photo in `public/photos/` and write the file name in `photo`. Restart the server. Riddles with no answer are skipped. A riddle with no photo shows the person's initials. The answer and photo are only sent to players at the reveal. Photos committed to the repo are public if the repo or the site is public.
+
 ## Run locally
 
 ```bash
@@ -46,6 +58,8 @@ The mic only works on `https://` or `localhost`. Render gives you HTTPS.
 | `RECORD_PHASE_SECONDS` | 90 | Total time for the recorder |
 | `MAX_CLIP_SECONDS` | 20 | Max recording length |
 | `DEFAULT_VOTE_SECONDS` | 30 | Voting time (host can change it in the game) |
+| `DEFAULT_RIDDLE_SECONDS` | 45 | Time to answer a riddle (host can change it in the game) |
+| `RIDDLES_FILE` | `server/riddles.js` | Use a different riddle file |
 | `ROOM_IDLE_MINUTES` | 30 | Close the room after this long with nobody connected |
 | `RECORDER_OFFLINE_SECONDS` | 20 | Skip the round if the recorder is offline this long |
 | `RECLAIM_AFTER_SECONDS` | 15 | Someone who lost their session can join again with the same name after their seat has been offline this long |
@@ -56,6 +70,8 @@ The mic only works on `https://` or `localhost`. Render gives you HTTPS.
 server/index.js    Express REST API + Socket.io events
 server/game.js     Room and game logic (in memory)
 server/phrases.js  Default English phrases
+server/riddles.js  Guess the Teammate riddles, answers and photo file names
+public/photos/  Teammate photos
 public/            Pages: index (home), room (game), results
 public/js/audio.js Recording, Tone.js filters, WAV encoding
 test/smoke.js      End-to-end test of the game flow

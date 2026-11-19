@@ -1,5 +1,7 @@
 // Game logic for a single room. Everything lives in memory (no database).
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const DEFAULT_PHRASES = require('./phrases');
 
 const num = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
@@ -9,8 +11,10 @@ const CONFIG = {
   RECORD_PHASE_SECONDS: num(process.env.RECORD_PHASE_SECONDS, 90),
   MAX_CLIP_SECONDS: num(process.env.MAX_CLIP_SECONDS, 20),
   DEFAULT_VOTE_SECONDS: num(process.env.DEFAULT_VOTE_SECONDS, 30),
+  DEFAULT_RIDDLE_SECONDS: num(process.env.DEFAULT_RIDDLE_SECONDS, 45),
   POINTS_CORRECT_GUESS: 10,
   POINTS_PER_FOOLED: 5,
+  RIDDLE_SPEED_BONUS: 5, // a correct riddle answer gets up to this many extra points for being fast
   RECORDER_OFFLINE_SECONDS: num(process.env.RECORDER_OFFLINE_SECONDS, 20), // skip the round after this
   RECLAIM_AFTER_SECONDS: num(process.env.RECLAIM_AFTER_SECONDS, 15), // a seat can be taken back after this
 };
@@ -27,6 +31,44 @@ const PHASE = {
 // (also built there, currently turned off: deep, monster, robot, cave, underwater)
 const FILTERS = ['chipmunk', 'radio', 'alien', 'ghost', 'none']; // 'none' = real voice
 const PHRASE_CHOICES = 3;
+const MODES = ['voice', 'riddle'];
+
+// ---------- "Guess the Teammate" riddles (server/riddles.js) ----------
+const RIDDLES_FILE = process.env.RIDDLES_FILE ? path.resolve(process.env.RIDDLES_FILE) : path.join(__dirname, 'riddles.js');
+const PHOTO_DIR = path.join(__dirname, '..', 'public', 'photos');
+const oneLine = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+
+function uniqueNames(list) {
+  const seen = new Map();
+  for (const raw of list) {
+    const n = oneLine(raw);
+    if (n && !seen.has(n.toLowerCase())) seen.set(n.toLowerCase(), n);
+  }
+  return [...seen.values()].sort((a, b) => a.localeCompare(b, 'en', { sensitivity: 'base' }));
+}
+
+// A riddle with an `answer` is a quiz. Without one it is a team vote: the most-voted name wins.
+// Riddles with no text or nothing to choose from are skipped.
+// Answers and photos never go to players before the reveal.
+function loadRiddles() {
+  const { TEAMMATES = [], RIDDLES = [] } = require(RIDDLES_FILE);
+  const names = uniqueNames([...TEAMMATES, ...RIDDLES.filter((r) => !r.choices).map((r) => r.answer)]);
+  return RIDDLES.map((r) => {
+    const answer = oneLine(r.answer);
+    const choices = r.choices ? uniqueNames([...r.choices, answer]) : names;
+    return {
+      title: oneLine(r.title),
+      text: String(r.text || '').trim(),
+      hard: !!r.hard,
+      answer: answer ? choices.find((c) => c.toLowerCase() === answer.toLowerCase()) : null,
+      choices,
+      photo: r.photo ? path.basename(String(r.photo)) : '', // basename: no paths outside public/photos
+    };
+  }).filter((q) => q.text && q.choices.length >= 2);
+}
+const RIDDLES = loadRiddles();
+
+const photoUrl = (file) => (file && fs.existsSync(path.join(PHOTO_DIR, file)) ? `/photos/${encodeURIComponent(file)}` : null);
 
 class GameError extends Error {
   constructor(message, status = 400) {
@@ -77,6 +119,15 @@ function wavDurationSeconds(buf) {
   return dataSize / byteRate;
 }
 
+// What everyone sees about a finished round after the game ends.
+function replayEntry(h) {
+  const base = { kind: h.kind, number: h.number, correctCount: h.correctCount, voterCount: h.voterCount };
+  if (h.kind === 'riddle') {
+    return { ...base, title: h.title, answer: h.answer, photoUrl: h.photoUrl, fastestName: h.fastest ? h.fastest.name : null };
+  }
+  return { ...base, recorderName: h.recorderName, phrase: h.phrase, filter: h.filter, clipUrl: h.clipUrl };
+}
+
 class Room {
   constructor(hostName, hooks = {}) {
     this.code = makeCode();
@@ -87,9 +138,10 @@ class Room {
     this.phase = PHASE.LOBBY;
     this.round = null;
     this.history = [];
-    this.settings = { voteSeconds: CONFIG.DEFAULT_VOTE_SECONDS, customPhrases: [] };
+    this.settings = { mode: 'voice', voteSeconds: CONFIG.DEFAULT_VOTE_SECONDS, riddleSeconds: CONFIG.DEFAULT_RIDDLE_SECONDS, customPhrases: [] };
     this.pickedThisCycle = new Set();
     this.usedPhrases = new Set();
+    this.usedRiddles = new Set(); // indexes into RIDDLES already asked this game
     this.clips = new Map();
     this.timer = null;
     this.notice = null;
@@ -266,6 +318,11 @@ class Room {
       if (!Number.isFinite(v) || v < 10 || v > 120) throw new GameError('Voting time must be between 10 and 120 seconds');
       this.settings.voteSeconds = v;
     }
+    if (data.riddleSeconds !== undefined) {
+      const v = Math.round(Number(data.riddleSeconds));
+      if (!Number.isFinite(v) || v < 10 || v > 180) throw new GameError('Riddle time must be between 10 and 180 seconds');
+      this.settings.riddleSeconds = v;
+    }
     if (data.customPhrases !== undefined) {
       if (!Array.isArray(data.customPhrases)) throw new GameError('Invalid phrase list');
       this.settings.customPhrases = data.customPhrases
@@ -273,6 +330,15 @@ class Room {
         .filter((p) => p.length > 0 && p.length <= 150)
         .slice(0, 200);
     }
+    this.changed();
+  }
+
+  setMode(by, mode) {
+    this.requireStaff(by);
+    if (!MODES.includes(mode)) throw new GameError('Invalid game mode');
+    if (![PHASE.LOBBY, PHASE.REVEAL].includes(this.phase)) throw new GameError('Finish the current round before switching the game');
+    if (this.settings.mode === mode) return;
+    this.settings.mode = mode;
     this.changed();
   }
 
@@ -305,6 +371,7 @@ class Room {
   pick(by) {
     this.requireStaff(by);
     if (![PHASE.LOBBY, PHASE.REVEAL].includes(this.phase)) throw new GameError('A round is already in progress');
+    if (this.settings.mode === 'riddle') return this.startRiddle();
     const online = [...this.members.values()].filter((m) => m.role === 'player' && m.sockets.size > 0);
     if (online.length < 2) throw new GameError('At least 2 online players are needed');
 
@@ -337,6 +404,103 @@ class Room {
     this.setNotice(null);
     this.setTimer(deadline - Date.now(), () => this.skipRound('Time is up, no clip was sent. Round skipped'));
     this.changed();
+  }
+
+  // Riddles are asked in the order of server/riddles.js. Every player answers once; correct answers
+  // score POINTS_CORRECT_GUESS plus a speed bonus.
+  startRiddle() {
+    if (!RIDDLES.length) throw new GameError('No riddles are set up yet. Add riddles and names in server/riddles.js and restart the server');
+    const index = RIDDLES.findIndex((_, i) => !this.usedRiddles.has(i));
+    if (index < 0) throw new GameError('All riddles have been asked. Press End game to see the winner');
+    const online = [...this.members.values()].filter((m) => m.role === 'player' && m.sockets.size > 0);
+    if (online.length < 1) throw new GameError('At least 1 online player is needed');
+    this.usedRiddles.add(index);
+    const startedAt = Date.now();
+    this.round = {
+      kind: 'riddle',
+      id: randomId(8),
+      number: this.history.length + 1,
+      riddleIndex: index,
+      startedAt,
+      deadline: startedAt + this.settings.riddleSeconds * 1000,
+      voters: new Set(online.map((m) => m.id)), // players who join mid-riddle are added when they answer
+      votes: new Map(), // playerId -> { choice, at }
+      result: null,
+    };
+    this.phase = PHASE.VOTING;
+    this.setNotice(null);
+    this.setTimer(this.round.deadline - startedAt, () => this.reveal());
+    this.changed();
+  }
+
+  answerRiddle(member, { roundId, choice }) {
+    const r = this.round;
+    if (this.phase !== PHASE.VOTING || !r || r.kind !== 'riddle' || r.id !== roundId) throw new GameError('Answering has closed', 409);
+    if (member.role !== 'player') throw new GameError('Only players can answer', 403);
+    if (r.votes.has(member.id)) throw new GameError('You have already answered this riddle', 409);
+    const q = RIDDLES[r.riddleIndex];
+    const pick = q.choices.find((c) => c === choice);
+    if (!pick) throw new GameError('Invalid answer');
+    r.voters.add(member.id);
+    r.votes.set(member.id, { choice: pick, at: Date.now() });
+    if (!this.checkAllVoted()) this.changed();
+  }
+
+  revealRiddle() {
+    const r = this.round;
+    const q = RIDDLES[r.riddleIndex];
+    const total = Math.max(1, r.deadline - r.startedAt);
+
+    // How many votes each name got, most first.
+    const counts = new Map();
+    for (const v of r.votes.values()) counts.set(v.choice, (counts.get(v.choice) || 0) + 1);
+    const tally = [...counts]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+    // Quiz: the set answer. Team vote: the most-voted name(s); a tie shares the win.
+    const teamVote = !q.answer;
+    const top = tally.length ? tally[0].count : 0;
+    const winners = teamVote ? tally.filter((t) => t.count === top).map((t) => t.name) : [q.answer];
+
+    const votes = [...r.votes]
+      .map(([voterId, v]) => {
+        const correct = winners.includes(v.choice);
+        const bonus = correct ? Math.round((CONFIG.RIDDLE_SPEED_BONUS * Math.max(0, r.deadline - v.at)) / total) : 0;
+        return {
+          voterId,
+          voterName: this.members.get(voterId)?.name || '?',
+          choice: v.choice,
+          correct,
+          points: correct ? CONFIG.POINTS_CORRECT_GUESS + bonus : 0,
+          seconds: Math.round((v.at - r.startedAt) / 100) / 10,
+        };
+      })
+      .sort((a, b) => a.seconds - b.seconds);
+    for (const v of votes) {
+      const m = this.members.get(v.voterId);
+      if (m && v.points) m.score += v.points;
+    }
+    const fastest = votes.find((v) => v.correct);
+    return {
+      kind: 'riddle',
+      roundId: r.id,
+      number: r.number,
+      riddleNumber: r.riddleIndex + 1,
+      title: q.title,
+      text: q.text,
+      hard: q.hard,
+      teamVote,
+      answer: winners.length ? winners.join(' & ') : null, // null: team vote that nobody voted in
+      photoUrl: photoUrl(q.photo),
+      tally,
+      votes,
+      voterCount: r.voters.size,
+      correctCount: votes.filter((v) => v.correct).length,
+      fastest: fastest ? { id: fastest.voterId, name: fastest.voterName, seconds: fastest.seconds } : null,
+      deltas: votes.filter((v) => v.points).map((v) => ({ id: v.voterId, name: v.voterName, points: v.points })),
+      at: Date.now(),
+    };
   }
 
   skipRound(message) {
@@ -397,7 +561,9 @@ class Room {
     this.changed();
   }
 
-  castVote(member, { roundId, targetId }) {
+  castVote(member, data = {}) {
+    if (this.round && this.round.kind === 'riddle') return this.answerRiddle(member, data);
+    const { roundId, targetId } = data;
     const r = this.round;
     if (this.phase !== PHASE.VOTING || !r || r.id !== roundId) throw new GameError('Voting has closed', 409);
     if (!r.voters.has(member.id)) throw new GameError('You cannot vote in this round', 403);
@@ -429,6 +595,13 @@ class Room {
     const r = this.round;
     if (this.phase !== PHASE.VOTING || !r) return;
     this.clearTimer();
+    if (r.kind === 'riddle') {
+      r.result = this.revealRiddle();
+      this.history.push(r.result);
+      this.phase = PHASE.REVEAL;
+      this.changed();
+      return;
+    }
     const nameOf = (id) => r.candidates.find((c) => c.id === id)?.name || this.members.get(id)?.name || '?';
     const deltas = {};
     const add = (id, pts) => {
@@ -447,6 +620,7 @@ class Room {
     }
 
     const result = {
+      kind: 'voice',
       roundId: r.id,
       number: r.number,
       phrase: r.phrase,
@@ -479,8 +653,11 @@ class Room {
     this.changed();
   }
 
-  newGame(by) {
+  // `mode` (optional) picks which game the new game starts with.
+  newGame(by, mode) {
     this.requireStaff(by);
+    if (mode !== undefined && !MODES.includes(mode)) throw new GameError('Invalid game mode');
+    if (mode) this.settings.mode = mode;
     this.clearTimer();
     for (const m of this.members.values()) m.score = 0;
     this.gameId = randomId(6);
@@ -488,6 +665,7 @@ class Room {
     this.history = [];
     this.pickedThisCycle.clear();
     this.usedPhrases.clear();
+    this.usedRiddles.clear();
     this.clips.clear();
     this.phase = PHASE.LOBBY;
     this.setNotice('New game started! All scores reset to 0');
@@ -512,8 +690,26 @@ class Room {
       .map((m) => ({ id: m.id, name: m.name, role: m.role, score: m.score, online: m.sockets.size > 0 }));
 
     let round = null;
-    if (r) {
-      round = { id: r.id, number: r.number, deadline: r.deadline };
+    if (r && r.kind === 'riddle') {
+      const q = RIDDLES[r.riddleIndex];
+      round = {
+        kind: 'riddle',
+        id: r.id,
+        number: r.number,
+        deadline: r.deadline,
+        riddleNumber: r.riddleIndex + 1,
+        riddle: { title: q.title, text: q.text, hard: q.hard }, // no answer until the reveal
+        teamVote: !q.answer,
+        total: r.deadline - r.startedAt,
+        choices: q.choices,
+        voterCount: r.voters.size,
+        votedCount: r.votes.size,
+        canAnswer: this.phase === PHASE.VOTING && me.role === 'player',
+        myAnswer: r.votes.get(me.id)?.choice || null,
+      };
+      if (this.phase === PHASE.REVEAL) round.result = r.result;
+    } else if (r) {
+      round = { kind: 'voice', id: r.id, number: r.number, deadline: r.deadline };
       if (this.phase === PHASE.VOTING || this.phase === PHASE.REVEAL) {
         round.candidates = r.candidates;
         round.clipUrl = r.clipId ? `/api/clips/${r.clipId}` : null;
@@ -531,6 +727,8 @@ class Room {
       gameId: this.gameId,
       serverNow: Date.now(),
       phase: this.phase,
+      mode: this.settings.mode,
+      riddles: { total: RIDDLES.length, asked: this.usedRiddles.size },
       notice: this.notice,
       limits: {
         maxPlayers: CONFIG.MAX_PLAYERS,
@@ -538,8 +736,9 @@ class Room {
         recordPhaseSeconds: CONFIG.RECORD_PHASE_SECONDS,
         pointsCorrect: CONFIG.POINTS_CORRECT_GUESS,
         pointsFooled: CONFIG.POINTS_PER_FOOLED,
+        riddleSpeedBonus: CONFIG.RIDDLE_SPEED_BONUS,
       },
-      settings: staff ? this.settings : { voteSeconds: this.settings.voteSeconds },
+      settings: staff ? this.settings : { voteSeconds: this.settings.voteSeconds, riddleSeconds: this.settings.riddleSeconds },
       me: { id: me.id, name: me.name, role: me.role, score: me.score },
       members,
       round,
@@ -548,21 +747,10 @@ class Room {
           ? { roundId: r.id, options: r.options, deadline: r.deadline }
           : null,
       history: staff ? this.history : undefined,
-      // At the end everyone can replay every clip to confirm whose voice it was.
-      replay:
-        this.phase === PHASE.ENDED
-          ? this.history.map((h) => ({
-              number: h.number,
-              recorderName: h.recorderName,
-              phrase: h.phrase,
-              filter: h.filter,
-              clipUrl: h.clipUrl,
-              correctCount: h.correctCount,
-              voterCount: h.voterCount,
-            }))
-          : undefined,
+      // At the end everyone can replay every clip / see every riddle answer.
+      replay: this.phase === PHASE.ENDED ? this.history.map(replayEntry) : undefined,
     };
   }
 }
 
-module.exports = { Room, GameError, CONFIG, PHASE, FILTERS, wavDurationSeconds };
+module.exports = { Room, GameError, CONFIG, PHASE, FILTERS, RIDDLES, wavDurationSeconds };

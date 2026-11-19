@@ -2,7 +2,7 @@ const path = require('path');
 const http = require('http');
 const express = require('express');
 const { Server } = require('socket.io');
-const { Room, GameError, CONFIG } = require('./game');
+const { Room, GameError, CONFIG, RIDDLES } = require('./game');
 
 const PORT = Number(process.env.PORT) || 3000;
 const ROOM_IDLE_MINUTES = Number(process.env.ROOM_IDLE_MINUTES) || 30;
@@ -247,10 +247,11 @@ io.on('connection', (socket) => {
   on('host:skip', (m) => room.staffSkip(m));
   on('host:end-voting', (m) => room.staffEndVoting(m));
   on('host:end-game', (m) => room.endGame(m));
-  on('host:new-game', (m) => room.newGame(m));
+  on('host:new-game', (m, d) => room.newGame(m, d.mode));
   on('host:kick', (m, d) => room.kick(m, d.playerId));
   on('host:set-role', (m, d) => room.setRole(m, d.playerId, d.role));
   on('host:settings', (m, d) => room.updateSettings(m, d));
+  on('host:mode', (m, d) => room.setMode(m, d.mode));
   on('host:close-room', (m) => {
     room.requireHost(m);
     setTimeout(() => closeRoom('The host closed the room'), 50);
@@ -269,6 +270,7 @@ io.on('connection', (socket) => {
 
 server.listen(PORT, () => {
   console.log(`Voice Guess Game running on http://localhost:${PORT}`);
+  console.log(`[riddles] ${RIDDLES.length} riddle(s) ready${RIDDLES.length ? '' : ' (fill in the answers in server/riddles.js)'}`);
 });
 
 // Graceful stop for Docker

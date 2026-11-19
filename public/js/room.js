@@ -43,7 +43,7 @@
     token: 0,
   };
   let testEnabled = null;
-  const testAllowed = () => state && !['RECORDING', 'VOTING'].includes(state.phase);
+  const testAllowed = () => state && state.mode === 'voice' && !['RECORDING', 'VOTING'].includes(state.phase);
 
   const filterLabel = (id) => (FILTERS.find((f) => f.id === id) || {}).label || id;
 
@@ -55,6 +55,23 @@
 
   const now = () => Date.now() + clockOffset;
   const isStaff = () => state && (state.me.role === 'host' || state.me.role === 'cohost');
+  const isRiddle = () => state && state.mode === 'riddle';
+
+  // Teammate photo, or their initials if there is no photo.
+  const initials = (name) =>
+    String(name || '?')
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((w) => w[0].toUpperCase())
+      .join('');
+  // A steady colour per name, so everyone's initials circle looks the same on every screen.
+  const hue = (name) => [...String(name)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+  const avatar = (url, name, cls = '') =>
+    url
+      ? `<img class="avatar ${cls}" src="${esc(url)}" alt="${esc(name)}">`
+      : `<div class="avatar avatar-initials ${cls}" style="--h:${hue(name)}" aria-label="${esc(name)}">${esc(initials(name))}</div>`;
+
   const fmtTime = (ms) => {
     const s = Math.max(0, Math.ceil(ms / 1000));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -223,11 +240,27 @@
     if (!isStaff()) return;
     const p = state.phase;
     const b = [];
-    if (p === 'LOBBY' || p === 'REVEAL') b.push(`<button class="big" data-action="pick">${p === 'REVEAL' ? 'Next round' : 'Pick random player'}</button>`);
-    if (p === 'RECORDING') b.push(`<button class="secondary" data-action="skip">Skip round</button>`);
-    if (p === 'VOTING') b.push(`<button class="secondary" data-action="end-voting">End voting now</button>`);
+    const canSwitch = p === 'LOBBY' || p === 'REVEAL';
+    b.push(`<div class="mode-switch" role="group" aria-label="Game">
+      <button class="${state.mode === 'voice' ? 'active' : ''}" data-action="mode" data-mode="voice" ${canSwitch ? '' : 'disabled'}>Whose Voice?</button>
+      <button class="${state.mode === 'riddle' ? 'active' : ''}" data-action="mode" data-mode="riddle" ${canSwitch ? '' : 'disabled'}>Guess the Teammate</button>
+    </div>`);
+    if (isRiddle()) {
+      const { total, asked } = state.riddles;
+      if (canSwitch) b.push(`<button class="big" data-action="pick" ${asked >= total ? 'disabled' : ''}>${asked ? 'Next riddle' : 'Show first riddle'}</button>`);
+      if (p === 'VOTING') b.push(`<button class="secondary" data-action="end-voting">Reveal answer now</button>`);
+      b.push(`<p class="muted small" style="margin:.2rem 0 0">Riddles: ${asked}/${total} asked${total && asked >= total ? ' · all done, press End game' : ''}${total ? '' : ' · none set up in server/riddles.js'}</p>`);
+    } else {
+      if (canSwitch) b.push(`<button class="big" data-action="pick">${p === 'REVEAL' ? 'Next round' : 'Pick random player'}</button>`);
+      if (p === 'RECORDING') b.push(`<button class="secondary" data-action="skip">Skip round</button>`);
+      if (p === 'VOTING') b.push(`<button class="secondary" data-action="end-voting">End voting now</button>`);
+    }
     if (p !== 'ENDED') b.push(`<button class="secondary" data-action="end-game">End game</button>`);
-    if (p === 'ENDED') b.push(`<button class="good" data-action="new-game">New game</button>`);
+    if (p === 'ENDED') {
+      b.push(`<p class="muted small" style="margin:.3rem 0 0">Start a new game (scores reset to 0):</p>`);
+      b.push(`<button class="good" data-action="new-game" data-mode="riddle">New game: Guess the Teammate</button>`);
+      b.push(`<button class="secondary" data-action="new-game" data-mode="voice">New game: Whose Voice?</button>`);
+    }
     const online = state.members.filter((m) => m.role === 'player' && m.online).length;
     b.push(`<p class="muted small" style="margin:.2rem 0 0">${online} players online</p>`);
     $('controls').innerHTML = b.join('');
@@ -237,6 +270,7 @@
     $('settingsPanel').classList.toggle('hidden', !isStaff());
     if (!isStaff() || settingsLoaded) return;
     $('voteSeconds').value = state.settings.voteSeconds;
+    $('riddleSeconds').value = state.settings.riddleSeconds;
     $('customPhrases').value = (state.settings.customPhrases || []).join('\n');
     settingsLoaded = true;
   }
@@ -267,7 +301,7 @@
   // ------------------------------------------------------------ stage
   function renderStage() {
     const r = state.round;
-    const key = [state.phase, r && r.id, state.myTurn ? 'turn' : '', r && r.amRecorder ? 'mine' : '', r && r.canVote ? 'vote' : '', state.me.role].join('|');
+    const key = [state.phase, state.mode, r && r.id, state.myTurn ? 'turn' : '', r && r.amRecorder ? 'mine' : '', r && (r.canVote || r.canAnswer) ? 'vote' : '', state.me.role].join('|');
     if (key !== stageKey) {
       stageKey = key;
       $('stage').innerHTML = buildStage();
@@ -279,9 +313,12 @@
   function buildStage() {
     const s = state;
     const r = s.round;
+    if (s.phase === 'LOBBY' && isRiddle()) return buildRiddleLobby();
+    if (r && r.kind === 'riddle' && s.phase === 'VOTING') return buildRiddleQuestion();
+    if (r && r.kind === 'riddle' && s.phase === 'REVEAL') return buildRiddleReveal();
     switch (s.phase) {
       case 'LOBBY':
-        return `<div class="stage-center">
+        return `${gamePicker()}<div class="stage-center">
           <h2 class="phase-title">Lobby</h2>
           <p class="muted">${isStaff() ? 'When everyone is here, press <b>Pick random player</b>.' : 'Waiting for the host to start the round...'}</p>
           ${s.me.role === 'player' ? '<p class="muted small">Try the Voice test below. It also gives mic permission now, so you do not waste time when your turn comes.</p>' : ''}
@@ -370,10 +407,16 @@
           .join('')}</ol>
         ${
           s.replay && s.replay.length
-            ? `<h4>Listen again</h4>
+            ? `<h4>${s.replay.some((h) => h.kind === 'riddle') ? 'All rounds' : 'Listen again'}</h4>
           <div class="replay-list">${s.replay
-            .map(
-              (h) => `<div class="round-result">
+            .map((h) =>
+              h.kind === 'riddle'
+                ? `<div class="round-result riddle-replay">
+              ${avatar(h.photoUrl, h.answer, 'avatar-sm')}
+              <div><p style="margin:.2rem 0"><b>${esc(h.title)}</b> · ${esc(h.answer || 'No votes')}</p>
+              <p class="muted small" style="margin:0">${h.correctCount}/${h.voterCount} guessed right${h.fastestName ? ` · fastest: ${esc(h.fastestName)}` : ''}</p></div>
+            </div>`
+                : `<div class="round-result">
               <p style="margin:.2rem 0"><b>Round ${h.number}</b> · ${esc(h.recorderName)} <span class="muted">(${h.correctCount}/${h.voterCount} guessed right)</span></p>
               <p class="muted small" style="margin:.2rem 0 .5rem">"${esc(h.phrase)}" · filter: ${esc(filterLabel(h.filter))}</p>
               <audio controls preload="none" src="${esc(h.clipUrl)}"></audio>
@@ -387,9 +430,143 @@
     return '';
   }
 
+  // ------------------------------------------------------------ Guess the Teammate
+  // Host / co-host only: the two games as big cards at the top of the lobby.
+  function gamePicker() {
+    if (!isStaff()) return '';
+    const card = (mode, icon, name, desc) => `
+      <button class="game-card ${state.mode === mode ? 'active' : ''}" data-action="mode" data-mode="${mode}" aria-pressed="${state.mode === mode}">
+        <span class="gc-icon">${icon}</span>
+        <span class="gc-name">${name}</span>
+        <span class="gc-desc">${desc}</span>
+        <span class="gc-check">${state.mode === mode ? '✓ Selected' : 'Choose'}</span>
+      </button>`;
+    return `<div class="game-picker">
+      <h4 style="margin:0 0 .5rem">Choose a game</h4>
+      <div class="game-cards">
+        ${card('voice', '🎙️', 'Whose Voice?', 'One player records a disguised voice, everyone guesses who it was')}
+        ${card('riddle', '🕵️', 'Guess the Teammate', 'Read a riddle, the team votes who it describes, then the photo is revealed')}
+      </div>
+    </div>`;
+  }
+
+  function buildRiddleLobby() {
+    const s = state;
+    const { total, asked } = s.riddles;
+    return `${gamePicker()}<div class="stage-center riddle-lobby">
+      <div class="lobby-icon">🕵️</div>
+      <h2 class="phase-title gradient-text">Guess the Teammate</h2>
+      <p class="muted">${isStaff() ? 'When everyone is here, press <b>Show first riddle</b>.' : 'Waiting for the host to show the first riddle...'}</p>
+      <div class="how-grid">
+        <div><b>1. Read</b><span>A riddle describes someone on the team</span></div>
+        <div><b>2. Vote</b><span>Pick who you think it is. One vote each</span></div>
+        <div><b>3. Reveal</b><span>The team's top pick is shown with the photo</span></div>
+      </div>
+      <p class="muted small">Vote with the team (or the right answer): +${s.limits.pointsCorrect} · speed bonus up to +${s.limits.riddleSpeedBonus} · ${s.settings.riddleSeconds}s per riddle</p>
+      ${isStaff() && !total ? '<p class="notice small">No riddles are set up yet. Add riddles and names in <b>server/riddles.js</b> and restart the server.</p>' : ''}
+      ${isStaff() && total ? `<p class="pill">${total - asked} of ${total} riddles left</p>` : ''}
+    </div>`;
+  }
+
+  function buildRiddleQuestion() {
+    const s = state;
+    const r = s.round;
+    let body;
+    if (r.canAnswer) {
+      body = `<p style="margin:0" id="answerHint"></p>
+        <div class="choice-grid">${r.choices
+          .map(
+            (c) => `<button class="choice-btn" data-action="answer" data-choice="${esc(c)}">
+              ${avatar(null, c, 'avatar-xs')}<span>${esc(c)}</span></button>`
+          )
+          .join('')}</div>`;
+    } else if (isStaff()) {
+      body = `<p class="muted">You are the ${s.me.role === 'host' ? 'host' : 'co-host'}, so you do not vote. Read the riddle out loud!</p>`;
+    } else {
+      body = '';
+    }
+    return `<div class="row" style="justify-content:space-between">
+        <span class="pill">Riddle ${r.riddleNumber}${r.riddle.hard ? ' · <span class="hard-tag">Hard mode</span>' : ''} · ${r.teamVote ? 'Team vote' : 'Quiz'}</span>
+        <span class="timer" data-deadline="${r.deadline}"></span>
+      </div>
+      <div class="time-bar"><div data-deadline-bar="${r.deadline}" data-total="${r.total}"></div></div>
+      <div class="riddle-card">
+        <h2>${esc(r.riddle.title)}</h2>
+        <p class="riddle-text">${esc(r.riddle.text)}</p>
+      </div>
+      <p class="muted small" id="voteProgress"></p>
+      ${body}`;
+  }
+
+  function buildRiddleReveal() {
+    const s = state;
+    const res = s.round.result;
+    const mine = res.votes.find((v) => v.voterId === s.me.id);
+    const winners = res.answer ? res.answer.split(' & ') : [];
+    let me = '';
+    if (mine && mine.correct) me = `<p class="points-pop">${res.teamVote ? 'You voted with the team!' : 'You got it!'} +${mine.points} points</p>`;
+    else if (mine) me = `<p class="muted">You picked ${esc(mine.choice)}.${res.teamVote ? ' The team saw it differently!' : ' Better luck next riddle!'}</p>`;
+    else if (s.me.role === 'player') me = '<p class="muted">You did not vote on this one.</p>';
+    const max = res.tally.length ? res.tally[0].count : 1;
+    const voted = res.votes.length;
+    const tally = res.tally.length
+      ? `<h4>${res.teamVote ? 'How the team voted' : 'Votes'}</h4>
+        <ul class="tally">${res.tally
+          .map(
+            (t) => `<li class="${winners.includes(t.name) ? 'win' : ''}">
+              <span class="t-name">${esc(t.name)}</span>
+              <span class="t-bar"><span style="width:${Math.round((t.count / max) * 100)}%"></span></span>
+              <span class="t-count">${t.count} <span class="muted small">(${Math.round((t.count / voted) * 100)}%)</span></span>
+            </li>`
+          )
+          .join('')}</ul>`
+      : '';
+    return `<div class="stage-center riddle-reveal">
+        ${res.answer ? '<div class="confetti" aria-hidden="true">' + '<i></i>'.repeat(18) + '</div>' : ''}
+        <p class="muted" style="margin:0">${esc(res.title)}</p>
+        <p class="reveal-kicker">${res.teamVote ? (res.answer ? 'The team has spoken... it\'s' : 'Nobody voted') : 'It\'s...'}</p>
+        <div class="photo-ring" ${res.photoUrl ? `data-action="zoom" data-src="${esc(res.photoUrl)}" data-name="${esc(res.answer || res.title)}" title="Click to view full screen"` : ''}>
+          ${avatar(res.photoUrl, res.answer || res.title, 'avatar-lg')}
+          ${res.photoUrl ? '<span class="zoom-hint">⤢ Full screen</span>' : ''}
+        </div>
+        ${res.answer ? `<div class="reveal-name gradient-text">${esc(res.answer)}</div>` : ''}
+        ${res.fastest ? `<p class="winner">🏆 <b>${esc(res.fastest.name)}</b> ${res.teamVote ? 'voted with the team first' : 'got it first'} (${res.fastest.seconds}s)</p>` : ''}
+        ${!res.teamVote ? `<p><b>${res.correctCount}/${res.voterCount}</b> guessed right</p>` : ''}
+        ${me}
+      </div>
+      ${tally}
+      <details class="who-voted"><summary>Who voted for whom</summary>
+      <ul class="vote-list">${
+        res.votes.length
+          ? res.votes
+              .map(
+                (v) => `<li>${v.correct ? '<span class="mark ok">✓</span>' : '<span class="mark no">✗</span>'} ${esc(v.voterName)} → ${esc(v.choice)}
+                  <span class="muted small">· ${v.seconds}s${v.points ? ` · +${v.points}` : ''}</span></li>`
+              )
+              .join('')
+          : '<li class="muted">Nobody voted</li>'
+      }</ul></details>
+      <p class="muted small">${isStaff() ? 'Press <b>Next riddle</b> to continue.' : 'The host will show the next riddle...'}</p>`;
+  }
+
   // Parts that change without rebuilding the stage
   function updateStage() {
     const r = state.round;
+    if (state.phase === 'VOTING' && r && r.kind === 'riddle') {
+      const vp = $('voteProgress');
+      if (vp) vp.textContent = `${r.votedCount}/${r.voterCount} have voted`;
+      const hint = $('answerHint');
+      if (hint) {
+        hint.innerHTML = r.myAnswer
+          ? `Your vote: <b>${esc(r.myAnswer)}</b>. Wait for the reveal!`
+          : `<b>Who is it?</b> <span class="muted small">${r.teamVote ? 'The most-voted name wins. ' : ''}One vote each, so choose carefully.</span>`;
+      }
+      document.querySelectorAll('.choice-btn[data-choice]').forEach((b) => {
+        b.classList.toggle('selected', b.dataset.choice === r.myAnswer);
+        b.disabled = !!r.myAnswer;
+      });
+      return;
+    }
     if (state.phase === 'VOTING' && r) {
       const vp = $('voteProgress');
       if (vp) vp.textContent = `${r.votedCount}/${r.voterCount} have voted`;
@@ -563,7 +740,7 @@
 
   // ------------------------------------------------------------ voice test (local only)
   function renderTestPanel() {
-    $('testPanel').classList.remove('hidden');
+    $('testPanel').classList.toggle('hidden', isRiddle());
     const allowed = testAllowed();
     if (allowed === testEnabled) return;
     testEnabled = allowed;
@@ -695,9 +872,40 @@
       case 'end-game': return confirm('End the game and show the final scoreboard?') && withBusy(() => send('host:end-game'));
       case 'new-game':
         if (!confirm('Start a new game? All scores reset to 0 and the recordings are deleted (old scores stay saved in your browser).')) return;
-        return withBusy(() => send('host:new-game'));
+        return withBusy(() => send('host:new-game', { mode: el.dataset.mode }));
       case 'kick': return confirm(`Remove ${el.dataset.name} from the room?`) && withBusy(() => send('host:kick', { playerId: el.dataset.id }));
       case 'role': return withBusy(() => send('host:set-role', { playerId: el.dataset.id, role: el.dataset.role }));
+
+      case 'zoom': {
+        const box = document.createElement('div');
+        box.className = 'lightbox';
+        box.innerHTML = `<img src="${esc(el.dataset.src)}" alt="${esc(el.dataset.name)}"><p class="gradient-text">${esc(el.dataset.name)}</p>`;
+        const close = () => {
+          box.remove();
+          document.removeEventListener('keydown', onKey);
+        };
+        const onKey = (ev) => ev.key === 'Escape' && close();
+        box.onclick = close;
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(box);
+        return;
+      }
+      case 'mode': {
+        if (state.mode === el.dataset.mode) return;
+        return withBusy(() => send('host:mode', { mode: el.dataset.mode }));
+      }
+      case 'answer': {
+        if (!r || r.myAnswer) return;
+        r.myAnswer = el.dataset.choice;
+        updateStage();
+        try {
+          await send('vote:cast', { roundId: r.id, choice: el.dataset.choice });
+        } catch {
+          r.myAnswer = null;
+          updateStage();
+        }
+        return;
+      }
 
       case 'test-filter': {
         test.filter = el.dataset.filter;
@@ -791,10 +999,11 @@
 
   $('saveSettings').onclick = async () => {
     const voteSeconds = Number($('voteSeconds').value);
+    const riddleSeconds = Number($('riddleSeconds').value);
     const lines = $('customPhrases').value.split('\n').map((s) => s.trim()).filter(Boolean);
     const customPhrases = lines.filter((s) => s.length <= 150);
     try {
-      await send('host:settings', { voteSeconds, customPhrases });
+      await send('host:settings', { voteSeconds, riddleSeconds, customPhrases });
       toast('Settings saved', 'success');
       if (customPhrases.length < lines.length) {
         toast(`${lines.length - customPhrases.length} phrase(s) longer than 150 characters were skipped`, 'error', 6000);
@@ -812,6 +1021,11 @@
     document.querySelectorAll('[data-deadline]').forEach((el) => {
       const left = Number(el.dataset.deadline) - now();
       el.textContent = fmtTime(left);
+      el.classList.toggle('low', left < 10000);
+    });
+    document.querySelectorAll('[data-deadline-bar]').forEach((el) => {
+      const left = Math.max(0, Number(el.dataset.deadlineBar) - now());
+      el.style.width = `${Math.min(100, (left / Number(el.dataset.total)) * 100)}%`;
       el.classList.toggle('low', left < 10000);
     });
     if (state) renderNotice();

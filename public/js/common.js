@@ -207,11 +207,23 @@
           .map((s, i) => `<li><span class="rank">${i + 1}</span><span class="lb-name">${esc(s.name)}</span><span class="lb-score">${s.score}</span></li>`)
           .join('')}</ol>`
       : '<p class="muted">No players.</p>';
+    const mark = (ok) => (ok ? '<span class="mark ok">✓</span>' : '<span class="mark no">✗</span>');
+    const riddleRound = (h) => `
+      <details class="round-result">
+        <summary><b>Round ${h.number}</b> · ${esc(h.title)}: ${esc(h.answer || 'No votes')}${h.teamVote ? ' (team vote)' : ''} <span class="muted">(${h.correctCount}/${h.voterCount} ${h.teamVote ? 'voted with the team' : 'guessed right'})</span></summary>
+        <ul class="vote-list">${
+          h.votes.length
+            ? h.votes.map((v) => `<li>${mark(v.correct)} ${esc(v.voterName)} → ${esc(v.choice)} <span class="muted small">· ${v.seconds}s${v.points ? ` · +${v.points}` : ''}</span></li>`).join('')
+            : '<li class="muted">Nobody answered</li>'
+        }</ul>
+      </details>`;
     const rounds = (game.history || [])
       .slice()
       .reverse()
-      .map(
-        (h) => `
+      .map((h) =>
+        h.kind === 'riddle'
+          ? riddleRound(h)
+          : `
       <details class="round-result">
         <summary><b>Round ${h.number}</b> · ${esc(h.recorderName)} <span class="muted">(${h.correctCount}/${h.voterCount} guessed right)</span></summary>
         <p class="muted">"${esc(h.phrase)}" · filter: ${esc(h.filter)}</p>
@@ -237,8 +249,20 @@
     [...(game.scores || [])]
       .sort((a, b) => b.score - a.score)
       .forEach((s, i) => lines.push([i + 1, q(s.name), s.score].join(',')));
-    lines.push('', 'ROUNDS', 'Round,Recorder,Phrase,Filter,Voter,Guessed,Correct');
-    for (const h of game.history || []) {
+    const history = game.history || [];
+    const voice = history.filter((h) => h.kind !== 'riddle');
+    const riddles = history.filter((h) => h.kind === 'riddle');
+    if (riddles.length) {
+      lines.push('', 'GUESS THE TEAMMATE', 'Round,Riddle,Answer,Player,Guessed,Correct,Seconds,Points');
+      for (const h of riddles) {
+        if (!h.votes.length) lines.push([h.number, q(h.title), q(h.answer), '', '', '', '', ''].join(','));
+        for (const v of h.votes) {
+          lines.push([h.number, q(h.title), q(h.answer), q(v.voterName), q(v.choice), v.correct ? 'YES' : 'NO', v.seconds, v.points].join(','));
+        }
+      }
+    }
+    if (voice.length || !riddles.length) lines.push('', 'ROUNDS', 'Round,Recorder,Phrase,Filter,Voter,Guessed,Correct');
+    for (const h of voice) {
       if (!h.votes.length) lines.push([h.number, q(h.recorderName), q(h.phrase), h.filter, '', '', ''].join(','));
       for (const v of h.votes) {
         lines.push([h.number, q(h.recorderName), q(h.phrase), h.filter, q(v.voterName), q(v.targetName), v.correct ? 'YES' : 'NO'].join(','));
